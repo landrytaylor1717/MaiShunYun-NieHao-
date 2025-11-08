@@ -343,7 +343,13 @@ def render_descriptor_chart(
         .mark_bar()
         .encode(
             x="amount:Q",
-            y=alt.Y("category:N", sort="-x", title="Descriptor"),
+            y=alt.Y(
+                "category:N",
+                sort="-x",
+                title="Descriptor",
+                axis=alt.Axis(labelLimit=0, labelOverlap=False),
+            ),
+            color=alt.Color("category:N", legend=None),
             tooltip=["category:N", "count:Q", "amount:Q"],
         )
         .properties(height=360)
@@ -498,9 +504,9 @@ def render_ramen_egg_chart(
     usage: pd.DataFrame,
     selected_period: Optional[pd.Timestamp],
 ) -> None:
-    keys = ["ramen", "egg"]
     subset = usage[
-        usage["ingredient"].str.contains("|".join(keys), case=False, na=False)
+        usage["ingredient"].str.contains("ramen", case=False, na=False)
+        | usage["ingredient"].str.contains("egg", case=False, na=False)
     ]
     st.markdown("### Ramen & Egg Usage")
     if subset.empty:
@@ -592,9 +598,20 @@ def render_ingredient_chart(
         st.info("Ingredient usage metrics will appear once data is available.")
         return
 
+    usage = usage[
+        ~usage["ingredient"].str.contains("ramen", case=False, na=False)
+        & ~usage["ingredient"].str.contains("egg", case=False, na=False)
+    ]
     usage = usage.assign(
         ingredient=lambda df: df["ingredient"].str.replace("_", " ").str.title()
     )
+    suffix_map = {
+        "Green Onion": "Green Onion (G)",
+        "Cilantro": "Cilantro (G)",
+        "Pickle Cabbage": "Pickle Cabbage (G)",
+        "White Onion": "White Onion (G)",
+    }
+    usage["ingredient"] = usage["ingredient"].replace(suffix_map)
     if selected_period is None:
         data = (
             usage.groupby("ingredient", as_index=False)["estimated_usage"]
@@ -823,7 +840,7 @@ def main() -> None:
 
     item_mix_source = estimate_item_mix(item_sales)
     usage = estimate_ingredient_usage(item_mix_source, recipe_book)
-    render_ingredient_chart(usage, selected_period, title="Top Ingredients by Usage")
+    render_ingredient_chart(usage.copy(), selected_period, title="Top Ingredients by Usage")
     render_ramen_egg_chart(usage, selected_period)
 
     st.divider()
