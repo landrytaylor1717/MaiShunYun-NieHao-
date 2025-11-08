@@ -5,13 +5,35 @@ Streamlit dashboard for Mai Shun Yun inventory intelligence.
 from __future__ import annotations
 
 import os
-from typing import Dict, Optional
+from typing import Optional
 
 from collections.abc import Mapping
+import html
 
 import altair as alt
 import pandas as pd
 import streamlit as st
+
+DESCRIPTOR_NAMES = {
+    "additonal",
+    "additional",
+    "all day menu",
+    "appetizer",
+    "combo items",
+    "combo items donot delete",
+    "dessert",
+    "desert",
+    "drink",
+    "drinks",
+    "fruit tea",
+    "lunch menu",
+    "lunch special",
+    "milk tea",
+    "open food",
+    "prep item",
+    "signature drinks",
+}
+
 
 from data_loader import (
     DATA_DIR,
@@ -27,10 +49,8 @@ from features import (
     compute_days_on_hand,
     estimate_ingredient_usage,
     estimate_item_mix,
-    monthly_revenue_trend,
     summarise_sales,
 )
-from mongo_utils import fetch_recent_alerts, save_alert
 
 
 def _secrets_dict() -> Mapping[str, str]:
@@ -99,6 +119,122 @@ def format_percentage(value: float) -> str:
     return f"{value * 100:,.1f}%"
 
 
+DRINK_KEYWORDS = [
+    "tea",
+    "drink",
+    "juice",
+    "soda",
+    "ramune",
+    "milk tea",
+    "boba",
+    "water",
+    "coffee",
+    "smoothie",
+    "lemonade",
+    "sparkling",
+]
+
+APPETIZER_KEYWORDS = [
+    "appetizer",
+    "dumpling",
+    "bun",
+    "roll",
+    "wonton",
+    "fries",
+    "salad",
+    "egg roll",
+    "spring roll",
+    "rangoon",
+    "tempura",
+    "wing",
+]
+
+DESCRIPTOR_SET = {name.lower() for name in DESCRIPTOR_NAMES}
+
+
+def filter_individual_items(item_sales: pd.DataFrame) -> pd.DataFrame:
+    if item_sales.empty:
+        return item_sales
+    mask = ~item_sales["item_name"].astype(str).str.strip().str.lower().isin(DESCRIPTOR_SET)
+    return item_sales[mask].copy()
+
+
+def filter_descriptor_categories(summary: pd.DataFrame) -> pd.DataFrame:
+    if summary.empty:
+        return summary
+    mask = summary["category"].astype(str).str.strip().str.lower().isin(DESCRIPTOR_SET)
+    return summary[mask].copy()
+
+
+def filter_drink_items(item_sales: pd.DataFrame) -> pd.DataFrame:
+    if item_sales.empty:
+        return item_sales
+    pattern = "|".join(DRINK_KEYWORDS)
+    mask = item_sales["item_name"].astype(str).str.contains(pattern, case=False, na=False)
+    exclude_mask = item_sales["item_name"].astype(str).str.contains("bun|dumpling|soup", case=False, na=False)
+    return item_sales[mask & ~exclude_mask].copy()
+
+
+def filter_appetizer_items(item_sales: pd.DataFrame) -> pd.DataFrame:
+    if item_sales.empty:
+        return item_sales
+    pattern = "|".join(APPETIZER_KEYWORDS)
+    mask = item_sales["item_name"].astype(str).str.contains(pattern, case=False, na=False)
+    drink_names = filter_drink_items(item_sales)["item_name"].unique()
+    return item_sales[mask & ~item_sales["item_name"].isin(drink_names)].copy()
+
+
+def compute_item_trend(item_sales: pd.DataFrame) -> pd.DataFrame:
+    if item_sales.empty:
+        return pd.DataFrame(
+            columns=["period", "amount", "count", "amount_change_pct", "count_change_pct"]
+        )
+    trend = (
+        item_sales.groupby("period")[["amount", "count"]]
+        .sum()
+        .sort_index()
+        .reset_index()
+    )
+    trend["amount_change_pct"] = trend["amount"].pct_change()
+    trend["count_change_pct"] = trend["count"].pct_change()
+    return trend
+
+
+DESCRIPTOR_SET = {name.lower() for name in DESCRIPTOR_NAMES}
+
+
+def filter_individual_items(item_sales: pd.DataFrame) -> pd.DataFrame:
+    if item_sales.empty:
+        return item_sales
+    return item_sales[
+        ~item_sales["item_name"].astype(str).str.strip().str.lower().isin(DESCRIPTOR_SET)
+    ].copy()
+
+
+def filter_descriptor_categories(summary: pd.DataFrame) -> pd.DataFrame:
+    if summary.empty:
+        return summary
+    return summary[
+        summary["category"].astype(str).str.strip().str.lower().isin(DESCRIPTOR_SET)
+    ].copy()
+
+
+def compute_item_trend(item_sales: pd.DataFrame) -> pd.DataFrame:
+    if item_sales.empty:
+        return pd.DataFrame(
+            columns=["period", "amount", "count", "amount_change_pct", "count_change_pct"]
+        )
+    trend = (
+        item_sales.groupby("period")[["amount", "count"]]
+        .sum()
+        .sort_index()
+        .reset_index()
+    )
+    trend["amount_change_pct"] = trend["amount"].pct_change()
+    trend["count_change_pct"] = trend["count"].pct_change()
+    return trend
+
+
 def render_kpis(monthly_trend: pd.DataFrame, selected_period: Optional[pd.Timestamp] = None) -> None:
     if monthly_trend.empty:
         st.warning("No sales trend data available yet.")
@@ -136,53 +272,17 @@ def render_kpis(monthly_trend: pd.DataFrame, selected_period: Optional[pd.Timest
     col3.metric("Reporting Period", latest["period"].strftime("%b %Y"))
 
 
-def render_category_chart(summary: pd.DataFrame, selected_period: Optional[pd.Timestamp]) -> None:
-    if summary.empty:
-        st.info("Category breakdown will appear once data is available.")
-        return
-
-    if selected_period is None:
-        top_categories = (
-            summary.groupby("category")["amount"]
-            .sum()
-            .sort_values(ascending=False)
-            .head(10)
-            .index
-        )
-        data = summary[summary["category"].isin(top_categories)]
-        chart = (
-            alt.Chart(data)
-            .mark_line(point=True)
-            .encode(
-                x="period:T",
-                y="amount:Q",
-                color="category:N",
-                tooltip=["period:T", "category:N", "count:Q", "amount:Q"],
-            )
-            .interactive()
-        )
-    else:
-        data = summary.assign(category=lambda df: df["category"])
-        chart = (
-            alt.Chart(data)
-            .mark_bar()
-            .encode(
-                x="amount:Q",
-                y=alt.Y("category:N", sort="-x"),
-                color="category:N",
-                tooltip=["category:N", "count:Q", "amount:Q"],
-            )
-            .interactive()
-        )
-    st.altair_chart(chart, use_container_width=True)
-
-
 def render_item_chart(
-    item_sales: pd.DataFrame, selected_period: Optional[pd.Timestamp], limit: int = 15
+    item_sales: pd.DataFrame,
+    selected_period: Optional[pd.Timestamp],
+    *,
+    title: str = "Top Menu Items by Revenue",
+    limit: int = 15,
 ) -> None:
     if item_sales.empty:
-        st.info("Item-level sales will display once cleaned data is available.")
+        st.info(f"{title} will display once data is available.")
         return
+    st.markdown(f"### {title}")
     if selected_period is None:
         data = (
             item_sales.groupby("item_name", as_index=False)[["amount", "count"]]
@@ -196,6 +296,7 @@ def render_item_chart(
             .head(limit)
             .copy()
         )
+    data["item_name"] = data["item_name"].astype(str).str.title()
 
     chart = (
         alt.Chart(data)
@@ -210,39 +311,163 @@ def render_item_chart(
     )
     st.altair_chart(chart, use_container_width=True)
 
-    table = data.assign(
-        amount=lambda df: df["amount"].map(format_currency),
-        count=lambda df: df["count"].round().astype(int),
+
+def render_descriptor_chart(
+    descriptor_sales: pd.DataFrame, selected_period: Optional[pd.Timestamp], limit: int = 12
+) -> None:
+    st.markdown("### Group Descriptor Performance")
+    if descriptor_sales.empty:
+        st.info("Descriptor metrics will appear once data is available.")
+        return
+
+    if selected_period is None:
+        data = (
+            descriptor_sales.groupby("category", as_index=False)[["amount", "count"]]
+            .sum()
+            .sort_values("amount", ascending=False)
+            .head(limit)
+        )
+    else:
+        data = (
+            descriptor_sales[descriptor_sales["period"] == selected_period]
+            .sort_values("amount", ascending=False)
+            .head(limit)
+            .copy()
+        )
+
+    data["category"] = data["category"].astype(str).str.title()
+    chart = (
+        alt.Chart(data)
+        .mark_bar()
+        .encode(
+            x="amount:Q",
+            y=alt.Y("category:N", sort="-x", title="Descriptor"),
+            tooltip=["category:N", "count:Q", "amount:Q"],
+        )
+        .properties(height=360)
+        .interactive()
     )
-    st.dataframe(
-        table[["item_name", "count", "amount"]]
-        .rename(columns={"item_name": "Item", "count": "Units", "amount": "Revenue"}),
-        hide_index=True,
-        use_container_width=True,
+    st.altair_chart(chart, use_container_width=True)
+
+
+def render_drink_chart(
+    drink_sales: pd.DataFrame, selected_period: Optional[pd.Timestamp], limit: int = 15
+) -> None:
+    st.markdown("### Drinks by Revenue")
+    if drink_sales.empty:
+        st.info("Drink metrics will appear once data is available.")
+        return
+
+    if selected_period is None:
+        data = (
+            drink_sales.groupby("item_name", as_index=False)[["amount", "count"]]
+            .sum()
+            .sort_values("amount", ascending=False)
+            .head(limit)
+        )
+    else:
+        data = (
+            drink_sales[drink_sales["period"] == selected_period]
+            .groupby("item_name", as_index=False)[["amount", "count"]]
+            .sum()
+            .sort_values("amount", ascending=False)
+            .head(limit)
+            .copy()
+        )
+
+    data["item_name"] = data["item_name"].astype(str).str.title()
+    y_field = alt.Y("item_name:N", sort="-x", title="Drink")
+
+    chart = (
+        alt.Chart(data)
+        .mark_bar()
+        .encode(
+            x="amount:Q",
+            y=y_field,
+            color=alt.Color("item_name:N", legend=None),
+            tooltip=["item_name:N", "count:Q", "amount:Q"],
+        )
+        .properties(height=360)
+        .interactive()
     )
+    st.altair_chart(chart, use_container_width=True)
+
+
+def render_appetizer_chart(
+    appetizer_sales: pd.DataFrame, selected_period: Optional[pd.Timestamp], limit: int = 15
+) -> None:
+    st.markdown("### Appetizers by Revenue")
+    if appetizer_sales.empty:
+        st.info("Appetizer metrics will appear once data is available.")
+        return
+
+    if selected_period is None:
+        data = (
+            appetizer_sales.groupby("item_name", as_index=False)[["amount", "count"]]
+            .sum()
+            .sort_values("amount", ascending=False)
+            .head(limit)
+        )
+    else:
+        data = (
+            appetizer_sales[appetizer_sales["period"] == selected_period]
+            .groupby("item_name", as_index=False)[["amount", "count"]]
+            .sum()
+            .sort_values("amount", ascending=False)
+            .head(limit)
+            .copy()
+        )
+
+    data["item_name"] = data["item_name"].astype(str).str.title()
+    chart = (
+        alt.Chart(data)
+        .mark_bar()
+        .encode(
+            x="amount:Q",
+            y=alt.Y("item_name:N", sort="-x", title="Appetizer"),
+            color=alt.Color("item_name:N", legend=None),
+            tooltip=["item_name:N", "count:Q", "amount:Q"],
+        )
+        .properties(height=360)
+        .interactive()
+    )
+    st.altair_chart(chart, use_container_width=True)
 
 
 def render_ingredient_chart(
-    usage: pd.DataFrame, selected_period: Optional[pd.Timestamp], limit: int = 15
+    usage: pd.DataFrame,
+    selected_period: Optional[pd.Timestamp],
+    *,
+    title: str = "Top Ingredients by Usage",
+    limit: int = 15,
 ) -> None:
+    st.markdown(f"### {title}")
     if usage.empty:
         st.info("Ingredient usage metrics will appear once data is available.")
         return
 
-    display_usage = usage.assign(
+    usage = usage[
+        ~usage["ingredient"].str.contains(r"\b(ramen|egg)\b", case=False, na=False)
+        & ~usage["ingredient"].str.contains(r"\(count\)", case=False, na=False)
+    ]
+    if usage.empty:
+        st.info("Ingredient usage metrics will appear once data is available.")
+        return
+
+    usage = usage.assign(
         ingredient=lambda df: df["ingredient"].str.replace("_", " ").str.title()
     )
-
     if selected_period is None:
         data = (
-            display_usage.groupby("ingredient", as_index=False)["estimated_usage"]
+            usage.groupby("ingredient", as_index=False)["estimated_usage"]
             .sum()
             .sort_values("estimated_usage", ascending=False)
             .head(limit)
         )
     else:
         data = (
-            display_usage.sort_values("estimated_usage", ascending=False)
+            usage[usage["period"] == selected_period]
+            .sort_values("estimated_usage", ascending=False)
             .head(limit)
             .copy()
         )
@@ -260,18 +485,138 @@ def render_ingredient_chart(
     )
     st.altair_chart(chart, use_container_width=True)
 
-    st.dataframe(
-        data.assign(estimated_usage=lambda df: df["estimated_usage"].round(2)).rename(
-            columns={"estimated_usage": "Usage"}
-        ),
-        hide_index=True,
-        use_container_width=True,
+
+def render_ramen_egg_chart(
+    usage: pd.DataFrame,
+    selected_period: Optional[pd.Timestamp],
+) -> None:
+    keys = ["ramen", "egg"]
+    subset = usage[
+        usage["ingredient"].str.contains("|".join(keys), case=False, na=False)
+    ]
+    st.markdown("### Ramen & Egg Usage")
+    if subset.empty:
+        st.info("Ramen and egg usage will appear once data is available.")
+        return
+
+    subset = subset.assign(
+        ingredient=lambda df: df["ingredient"].str.replace("_", " ").str.title()
+    )
+    data = (
+        subset.groupby(["period", "ingredient"], as_index=False)["estimated_usage"]
+        .sum()
+        .sort_values("period")
     )
 
+    if selected_period is None:
+        chart = (
+            alt.Chart(data)
+            .mark_line(point=True)
+            .encode(
+                x="period:T",
+                y="estimated_usage:Q",
+                color="ingredient:N",
+                tooltip=["period:T", "ingredient:N", "estimated_usage:Q"],
+            )
+            .interactive()
+        )
+    else:
+        data = data[data["period"] == selected_period]
+        chart = (
+            alt.Chart(data)
+            .mark_bar()
+            .encode(
+                x="estimated_usage:Q",
+                y=alt.Y("ingredient:N", sort="-x"),
+                tooltip=["ingredient:N", "estimated_usage:Q"],
+            )
+        )
+    st.altair_chart(chart, use_container_width=True)
 
+
+def render_descriptor_chart(
+    descriptor_sales: pd.DataFrame, selected_period: Optional[pd.Timestamp], limit: int = 12
+) -> None:
+    st.markdown("### Group Descriptor Performance")
+    if descriptor_sales.empty:
+        st.info("Descriptor metrics will appear once data is available.")
+        return
+
+    if selected_period is None:
+        data = (
+            descriptor_sales.groupby("category", as_index=False)[["amount", "count"]]
+            .sum()
+            .sort_values("amount", ascending=False)
+            .head(limit)
+        )
+    else:
+        data = (
+            descriptor_sales[descriptor_sales["period"] == selected_period]
+            .sort_values("amount", ascending=False)
+            .head(limit)
+            .copy()
+        )
+
+    data["category"] = data["category"].astype(str).str.title()
+    chart = (
+        alt.Chart(data)
+        .mark_bar()
+        .encode(
+            x="amount:Q",
+            y=alt.Y("category:N", sort="-x", title="Descriptor"),
+            tooltip=["category:N", "count:Q", "amount:Q"],
+        )
+        .properties(height=360)
+        .interactive()
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
+def render_ingredient_chart(
+    usage: pd.DataFrame,
+    selected_period: Optional[pd.Timestamp],
+    *,
+    title: str = "Top Ingredients by Usage",
+    limit: int = 15,
+) -> None:
+    st.markdown(f"### {title}")
+    if usage.empty:
+        st.info("Ingredient usage metrics will appear once data is available.")
+        return
+
+    usage = usage.assign(
+        ingredient=lambda df: df["ingredient"].str.replace("_", " ").str.title()
+    )
+    if selected_period is None:
+        data = (
+            usage.groupby("ingredient", as_index=False)["estimated_usage"]
+            .sum()
+            .sort_values("estimated_usage", ascending=False)
+            .head(limit)
+        )
+    else:
+        data = (
+            usage[usage["period"] == selected_period]
+            .sort_values("estimated_usage", ascending=False)
+            .head(limit)
+            .copy()
+        )
+
+    chart = (
+        alt.Chart(data)
+        .mark_bar()
+        .encode(
+            x="estimated_usage:Q",
+            y=alt.Y("ingredient:N", sort="-x", title="Ingredient"),
+            tooltip=["ingredient:N", "estimated_usage:Q"],
+        )
+        .properties(height=400)
+        .interactive()
+    )
+    st.altair_chart(chart, use_container_width=True)
 def render_usage_table(alert_table: pd.DataFrame) -> None:
     if alert_table.empty:
-        st.info("Ingredient usage estimates will populate once recipe mapping is ready.")
+        st.info("Ingredient usage estimates will populate once data is available.")
         return
     table = alert_table.copy()
     table["ingredient"] = table["ingredient"].str.title()
@@ -280,37 +625,123 @@ def render_usage_table(alert_table: pd.DataFrame) -> None:
         use_container_width=True,
     )
 
-
-def handle_alert_submission(selected_row: Dict, notes: str) -> None:
-    payload = {
-        "ingredient": selected_row.get("ingredient"),
-        "projected_depletion_date": selected_row.get("projected_depletion_date"),
-        "recommended_reorder_qty": selected_row.get("recommended_reorder_qty"),
-        "notes": notes,
-    }
-    success = save_alert(payload)
-    if success:
-        st.success("Alert saved to MongoDB.")
-    else:
-        st.warning("MongoDB not configured; set MONGO_URI to enable persistence.")
-
-
 def render_gemini_assistant(context: str) -> None:
-    model, error = init_gemini()
-    st.subheader("Gemini Assistant")
-    if error:
-        st.info(error)
-        return
+    if "gemini_open" not in st.session_state:
+        st.session_state["gemini_open"] = False
     if "gemini_history" not in st.session_state:
-        st.session_state.gemini_history = []
+        st.session_state["gemini_history"] = []
 
-    for message in st.session_state.gemini_history:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    model, error = init_gemini()
+    st.markdown(
+        """
+        <style>
+        .gemini-fab-container {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            z-index: 1000;
+        }
+        .gemini-fab-container button {
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            border: none;
+            cursor: pointer;
+            background: linear-gradient(135deg, #6750a4, #9c6ce0);
+            color: white;
+            font-size: 28px;
+            box-shadow: 0 6px 24px rgba(103, 80, 164, 0.35);
+        }
+        .gemini-popup {
+            position: fixed;
+            bottom: 92px;
+            right: 24px;
+            width: 320px;
+            max-height: 60vh;
+            background: rgba(255, 255, 255, 0.97);
+            border-radius: 16px;
+            box-shadow: 0 24px 48px rgba(15, 23, 42, 0.25);
+            padding: 16px;
+            z-index: 1100;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .gemini-popup h4 {
+            margin: 0;
+            font-size: 1rem;
+            font-weight: 600;
+        }
+        .gemini-messages {
+            overflow-y: auto;
+            max-height: 32vh;
+            padding-right: 4px;
+        }
+        .gemini-msg {
+            border-radius: 10px;
+            padding: 8px 10px;
+            margin-bottom: 6px;
+            font-size: 0.9rem;
+            line-height: 1.3;
+        }
+        .gemini-msg.user {
+            background: #e8def8;
+            align-self: flex-end;
+        }
+        .gemini-msg.assistant {
+            background: #f5f5f5;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    prompt = st.chat_input("Ask about reorder priorities or demand trends…")
-    if prompt and model:
-        st.session_state.gemini_history.append({"role": "user", "content": prompt})
+    with st.container():
+        st.markdown('<div class="gemini-fab-container">', unsafe_allow_html=True)
+        if st.button("🤖", key="gemini_toggle"):
+            st.session_state["gemini_open"] = not st.session_state["gemini_open"]
+            st.experimental_rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    if not st.session_state["gemini_open"]:
+        return
+
+    if error:
+        st.session_state["gemini_open"] = False
+        st.warning(error)
+        return
+
+    messages = st.session_state["gemini_history"]
+    messages_html = "".join(
+        f"<div class='gemini-msg {'user' if msg['role']=='user' else 'assistant'}'>{html.escape(msg['content'])}</div>"
+        for msg in messages
+    ) or "<div class='gemini-msg assistant'>Ask a question to get started.</div>"
+
+    with st.container():
+        st.markdown(
+            f"<div class='gemini-popup'><h4>Gemini Assistant</h4><div class='gemini-messages'>{messages_html}</div>",
+            unsafe_allow_html=True,
+        )
+        with st.form("gemini_form", clear_on_submit=True):
+            prompt = st.text_input(
+                "Ask Gemini",
+                key="gemini_prompt",
+                label_visibility="collapsed",
+                placeholder="Ask about inventory insights…",
+            )
+            col_send, col_close = st.columns([3, 1])
+            send = col_send.form_submit_button("Send")
+            close = col_close.form_submit_button("Close")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    if close:
+        st.session_state["gemini_open"] = False
+        st.experimental_rerun()
+
+    if send:
+        if not prompt:
+            st.experimental_rerun()
+        st.session_state["gemini_history"].append({"role": "user", "content": prompt})
         try:
             response = model.generate_content(
                 f"""You are assisting a restaurant inventory manager.
@@ -324,23 +755,8 @@ Provide clear, actionable guidance and reference specific ingredients when possi
             answer = response.text or "I could not generate an answer."
         except Exception as exc:  # noqa: BLE001
             answer = f"Gemini request failed: {exc}"
-        st.session_state.gemini_history.append({"role": "assistant", "content": answer})
-        with st.chat_message("assistant"):
-            st.markdown(answer)
-
-
-def render_recent_alerts() -> None:
-    bootstrap_env_from_secrets()
-    st.subheader("Recent Saved Alerts (MongoDB)")
-    alerts = fetch_recent_alerts()
-    if not alerts:
-        st.caption("Connect MongoDB via MONGO_URI to persist alerts.")
-        return
-    alert_df = pd.DataFrame(alerts)
-    alert_df["created_at"] = pd.to_datetime(alert_df["created_at"])
-    st.dataframe(alert_df[["created_at", "ingredient", "notes"]], hide_index=True)
-
-
+        st.session_state["gemini_history"].append({"role": "assistant", "content": answer})
+        st.experimental_rerun()
 def main() -> None:
     st.set_page_config(
         page_title="Mai Shun Yun Inventory Intelligence",
@@ -364,7 +780,7 @@ def main() -> None:
     period_options = ["All Periods"] + list(period_map.keys())
     default_index = len(period_options) - 1 if periods else 0
 
-    st.subheader("Sales Mix & Revenue Trends")
+    st.subheader("Sales Performance Overview")
     select_col, _ = st.columns([1.5, 3])
     with select_col:
         selected_label = st.selectbox(
@@ -380,71 +796,63 @@ def main() -> None:
         item_sales if selected_period is None else item_sales[item_sales["period"] == selected_period]
     )
 
-    monthly_trend = monthly_revenue_trend(sales)
+    filtered_item_sales = filter_individual_items(item_sales)
+    filtered_item_sales_view = filter_individual_items(item_sales_view)
+    drink_sales = filter_drink_items(filtered_item_sales)
+    appetizer_sales = filter_appetizer_items(filtered_item_sales)
+    monthly_trend = compute_item_trend(filtered_item_sales)
     render_kpis(monthly_trend, selected_period)
 
     summary = summarise_sales(sales_view if not sales_view.empty else sales)
-    render_category_chart(summary, selected_period)
+    descriptor_sales = filter_descriptor_categories(summary)
+    render_descriptor_chart(descriptor_sales, selected_period)
 
-    st.markdown("#### Individual Meals")
-    render_item_chart(item_sales_view, selected_period)
+    render_item_chart(
+        filtered_item_sales_view, selected_period, title="Top Individual Meals by Revenue"
+    )
+    render_drink_chart(drink_sales, selected_period)
+    render_appetizer_chart(appetizer_sales, selected_period)
 
     item_mix_source = estimate_item_mix(item_sales)
     usage = estimate_ingredient_usage(item_mix_source, recipe_book)
-    usage_view = usage if selected_period is None else usage[usage["period"] == selected_period]
-
-    st.markdown("#### Ingredient Usage")
-    render_ingredient_chart(usage_view, selected_period)
+    render_ingredient_chart(usage, selected_period, title="Top Ingredients by Usage")
+    render_ramen_egg_chart(usage, selected_period)
 
     st.divider()
 
-    st.subheader("Ingredient Usage & Reorder Signals")
+    st.subheader("Forecasts & Reorder Signals")
     days_on_hand = compute_days_on_hand(usage, shipments)
     insights = list(build_inventory_insights(usage, None))
     alert_table = build_alert_table(insights)
 
     if not days_on_hand.empty:
+        st.markdown("### Estimated Days on Hand")
         st.dataframe(days_on_hand, use_container_width=True)
 
+    st.markdown("### Forecasted Reorder Signals")
     render_usage_table(alert_table)
-
-    if not alert_table.empty:
-        st.markdown("#### Save a Reorder Alert")
-        selected = st.selectbox(
-            "Choose ingredient",
-            alert_table["ingredient"],
-            index=0,
-            key="alert_select",
-        )
-        notes = st.text_area("Notes / instructions", placeholder="e.g., expedite delivery")
-        if st.button("Save Alert"):
-            selected_row = alert_table[alert_table["ingredient"] == selected].iloc[0]
-            handle_alert_submission(selected_row.to_dict(), notes)
-        render_recent_alerts()
 
     st.divider()
 
+    context = ""
     if not monthly_trend.empty:
-        if selected_period is not None:
-            revenue_row = monthly_trend[monthly_trend["period"] == selected_period]
-            if revenue_row.empty:
-                revenue_row = monthly_trend.iloc[[-1]]
-        else:
-            revenue_row = monthly_trend.iloc[[-1]]
-        revenue_value = revenue_row.iloc[0]["amount"]
-        revenue_label = revenue_row.iloc[0]["period"].strftime("%b %Y")
-        revenue_context = f"Revenue for {revenue_label}: {format_currency(revenue_value)}"
-    else:
-        revenue_context = "Revenue data unavailable."
-
+        ref_period = (
+            monthly_trend[monthly_trend["period"] == selected_period]
+            if selected_period is not None
+            else monthly_trend.iloc[[-1]]
+        )
+        if ref_period.empty:
+            ref_period = monthly_trend.iloc[[-1]]
+        revenue_value = ref_period.iloc[0]["amount"]
+        revenue_label = ref_period.iloc[0]["period"].strftime("%b %Y")
+        context = f"Revenue for {revenue_label}: {format_currency(revenue_value)}."
     if not alert_table.empty:
-        top_risk = alert_table.sort_values("days_on_hand").head(1)["ingredient"].iloc[0]
-        risk_context = f"Top ingredient at risk: {top_risk}"
-    else:
-        risk_context = "No ingredient risk computed."
+        top_risk = (
+            alert_table.sort_values("days_on_hand").head(1)["ingredient"].iloc[0]
+        )
+        context += f" Ingredient at risk: {top_risk}."
 
-    context_bits = [revenue_context, risk_context]
-    render_gemini_assistant("\n".join(context_bits))
+    render_gemini_assistant(context.strip())
 
 
 if __name__ == "__main__":

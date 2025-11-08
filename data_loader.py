@@ -94,16 +94,22 @@ def _load_cleaned_category_sales() -> pd.DataFrame:
         return pd.DataFrame(columns=["period", "category", "count", "amount"])
 
     frames: list[pd.DataFrame] = []
-    for path in sorted(CLEANED_DIR.glob("*data_2_cleaned.csv")):
+    for path in sorted(CLEANED_DIR.glob("*.csv")):
         df = pd.read_csv(path)
         df = _normalise_columns(df)
-        required_cols = {"category", "count", "amount"}
-        if not required_cols.issubset(df.columns):
+        if {"category", "count", "amount"}.issubset(df.columns):
+            category_col = "category"
+        elif {"group", "count", "amount"}.issubset(df.columns):
+            category_col = "group"
+        else:
             continue
+
         period = _parse_period_from_filename(path)
+        if period is None:
+            continue
         df = df.assign(
             period=period,
-            category=df["category"].astype(str).str.strip().str.title(),
+            category=df[category_col].astype(str).str.strip().str.title(),
             count=_clean_count(df["count"]),
             amount=_clean_currency(df["amount"]),
         )[["period", "category", "count", "amount"]]
@@ -168,16 +174,22 @@ def _load_cleaned_item_sales() -> pd.DataFrame:
         return pd.DataFrame(columns=["period", "item_name", "count", "amount"])
 
     frames: list[pd.DataFrame] = []
-    for path in sorted(CLEANED_DIR.glob("*data_3_cleaned.csv")):
+    for path in sorted(CLEANED_DIR.glob("*.csv")):
         df = pd.read_csv(path)
         df = _normalise_columns(df)
-        required_cols = {"item_name", "count", "amount"}
-        if not required_cols.issubset(df.columns):
+        if {"item_name", "count", "amount"}.issubset(df.columns):
+            item_col = "item_name"
+        elif {"item", "count", "amount"}.issubset(df.columns):
+            item_col = "item"
+        else:
             continue
+
         period = _parse_period_from_filename(path)
+        if period is None:
+            continue
         df = df.assign(
             period=period,
-            item_name=df["item_name"].astype(str).str.strip().str.title(),
+            item_name=df[item_col].astype(str).str.strip().str.title(),
             count=_clean_count(df["count"]),
             amount=_clean_currency(df["amount"]),
         )[["period", "item_name", "count", "amount"]]
