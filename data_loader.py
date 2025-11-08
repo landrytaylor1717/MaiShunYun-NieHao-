@@ -16,6 +16,7 @@ import pandas as pd
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "MSYData"
+CLEANED_DIR = BASE_DIR / "dataanalysis" / "cleaned"
 
 _MONTH_ORDER = {
     "january": 1,
@@ -53,6 +54,15 @@ def _clean_count(series: pd.Series) -> pd.Series:
     )
 
 
+def _normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of *df* with snake_case column names."""
+    df = df.copy()
+    df.columns = [
+        col.strip().lower().replace(" ", "_").replace("/", "_") for col in df.columns
+    ]
+    return df
+
+
 def _parse_period_from_filename(path: Path) -> Optional[pd.Timestamp]:
     """Infer a period (month) from filenames like 'June_Data_Matrix.xlsx'."""
     stem = path.stem.lower()
@@ -72,34 +82,58 @@ def _parse_period_from_filename(path: Path) -> Optional[pd.Timestamp]:
 
 
 def _normalise_category_column(df: pd.DataFrame) -> pd.DataFrame:
-    """Standardise the column name used for menu category."""
+    """Standardise the column name used for menu category (legacy Excel files)."""
     rename_map = {}
     if "Category" in df.columns and "Group" not in df.columns:
         rename_map["Category"] = "Group"
     return df.rename(columns=rename_map)
 
 
-@lru_cache(maxsize=1)
-def load_sales_data() -> pd.DataFrame:
-    """
-    Load all available monthly sales summaries.
+def _load_cleaned_category_sales() -> pd.DataFrame:
+    if not CLEANED_DIR.exists():
+        return pd.DataFrame(columns=["period", "category", "count", "amount"])
 
-    Returns
-    -------
-    DataFrame with columns:
-        period (Timestamp), category, count (float), amount (float)
-    """
+    frames: list[pd.DataFrame] = []
+    for path in sorted(CLEANED_DIR.glob("*data_2_cleaned.csv")):
+        df = pd.read_csv(path)
+        df = _normalise_columns(df)
+        required_cols = {"category", "count", "amount"}
+        if not required_cols.issubset(df.columns):
+            continue
+        period = _parse_period_from_filename(path)
+        df = df.assign(
+            period=period,
+            category=df["category"].astype(str).str.strip().str.title(),
+            count=_clean_count(df["count"]),
+            amount=_clean_currency(df["amount"]),
+        )[["period", "category", "count", "amount"]]
+        frames.append(df)
+
+    if not frames:
+        return pd.DataFrame(columns=["period", "category", "count", "amount"])
+
+    sales = pd.concat(frames, ignore_index=True)
+    sales = sales.sort_values(
+        ["period", "category"],
+        key=lambda col: col.fillna(pd.Timestamp.min) if col.name == "period" else col,
+    )
+    return sales.reset_index(drop=True)
+
+
+def _load_legacy_category_sales() -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
     if not DATA_DIR.exists():
-        raise FileNotFoundError(f"Data directory not found: {DATA_DIR}")
+        return pd.DataFrame(columns=["period", "category", "count", "amount"])
 
     for path in sorted(DATA_DIR.glob("*Data_Matrix*.xlsx")):
         df = pd.read_excel(path)
         df = _normalise_category_column(df)
         period = _parse_period_from_filename(path)
+        if "Group" not in df.columns:
+            continue
         df = df.assign(
             period=period,
-            category=df["Group"].astype(str).str.strip(),
+            category=df["Group"].astype(str).str.strip().str.title(),
             count=_clean_count(df["Count"]),
             amount=_clean_currency(df["Amount"]),
         )[["period", "category", "count", "amount"]]
@@ -110,9 +144,81 @@ def load_sales_data() -> pd.DataFrame:
 
     sales = pd.concat(frames, ignore_index=True)
     sales = sales.sort_values(
-        ["period", "category"], key=lambda col: col.fillna(pd.Timestamp.min)
+        ["period", "category"],
+        key=lambda col: col.fillna(pd.Timestamp.min) if col.name == "period" else col,
     )
     return sales.reset_index(drop=True)
+
+
+@lru_cache(maxsize=1)
+def load_sales_data() -> pd.DataFrame:
+    """
+    Load monthly sales summaries aggregated by category.
+
+    Returns columns: period (Timestamp), category, count (float), amount (float).
+    """
+    cleaned = _load_cleaned_category_sales()
+    if not cleaned.empty:
+        return cleaned
+    return _load_legacy_category_sales()
+
+
+def _load_cleaned_item_sales() -> pd.DataFrame:
+    if not CLEANED_DIR.exists():
+        return pd.DataFrame(columns=["period", "item_name", "count", "amount"])
+
+    frames: list[pd.DataFrame] = []
+    for path in sorted(CLEANED_DIR.glob("*data_3_cleaned.csv")):
+        df = pd.read_csv(path)
+        df = _normalise_columns(df)
+        required_cols = {"item_name", "count", "amount"}
+        if not required_cols.issubset(df.columns):
+            continue
+        period = _parse_period_from_filename(path)
+        df = df.assign(
+            period=period,
+            item_name=df["item_name"].astype(str).str.strip().str.title(),
+            count=_clean_count(df["count"]),
+            amount=_clean_currency(df["amount"]),
+        )[["period", "item_name", "count", "amount"]]
+        frames.append(df)
+
+    if not frames:
+        return pd.DataFrame(columns=["period", "item_name", "count", "amount"])
+
+    sales = pd.concat(frames, ignore_index=True)
+    sales = sales.sort_values(
+        ["period", "count"], key=lambda col: col.fillna(pd.Timestamp.min)
+    )
+    return sales.reset_index(drop=True)
+
+
+@lru_cache(maxsize=1)
+def load_item_sales_data() -> pd.DataFrame:
+    """
+    Load item-level sales data derived from cleaned exports.
+
+    Returns columns: period (Timestamp), item_name, count, amount.
+    """
+    return _load_cleaned_item_sales()
+
+
+def _resolve_recipe_path() -> Path:
+    cleaned_path = (
+        CLEANED_DIR / "MSY Data - Ingredient_MSY_Data_-_Ingredient_cleaned.csv"
+    )
+    if cleaned_path.exists():
+        return cleaned_path
+    return DATA_DIR / "MSY Data - Ingredient.csv"
+
+
+def _resolve_shipment_path() -> Path:
+    cleaned_path = (
+        CLEANED_DIR / "MSY Data - Shipment_MSY_Data_-_Shipment_cleaned.csv"
+    )
+    if cleaned_path.exists():
+        return cleaned_path
+    return DATA_DIR / "MSY Data - Shipment.csv"
 
 
 @lru_cache(maxsize=1)
@@ -126,8 +232,11 @@ def load_recipe_book(melt: bool = True) -> pd.DataFrame:
         When True (default), returns a long-form table with one ingredient per row.
         When False, returns the original wide layout.
     """
-    path = DATA_DIR / "MSY Data - Ingredient.csv"
-    df = pd.read_csv(path)
+    path = _resolve_recipe_path()
+    if path.suffix.lower() == ".csv":
+        df = pd.read_csv(path)
+    else:
+        df = pd.read_excel(path)
     df = df.rename(columns={"Item name": "item_name"})
     df["item_name"] = df["item_name"].str.strip()
 
@@ -157,8 +266,11 @@ def load_shipments() -> pd.DataFrame:
 
     Returns columns: ingredient, quantity_per_shipment, unit, shipments, frequency.
     """
-    path = DATA_DIR / "MSY Data - Shipment.csv"
-    df = pd.read_csv(path)
+    path = _resolve_shipment_path()
+    if path.suffix.lower() == ".csv":
+        df = pd.read_csv(path)
+    else:
+        df = pd.read_excel(path)
     df = df.rename(
         columns={
             "Ingredient": "ingredient",
@@ -190,5 +302,4 @@ def latest_period() -> Optional[pd.Timestamp]:
     if not periods:
         return None
     return periods[-1]
-
 

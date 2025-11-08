@@ -13,7 +13,12 @@ from typing import Dict, Iterable, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from data_loader import load_recipe_book, load_sales_data, load_shipments
+from data_loader import (
+    load_item_sales_data,
+    load_recipe_book,
+    load_sales_data,
+    load_shipments,
+)
 from forecast import ForecastResult, holt_winters_forecast, moving_average_forecast
 
 # Heuristic mapping from menu categories to the recipe book item names.
@@ -94,19 +99,30 @@ def monthly_revenue_trend(sales: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     return trend
 
 
-def estimate_item_mix(sales: pd.DataFrame) -> pd.DataFrame:
+def estimate_item_mix(sales: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     """
     Estimate item-level counts by distributing category totals across recipes.
 
     When the source data already contains `item_name`, it will be used directly.
     Otherwise, the function falls back to a heuristic mapping defined above.
     """
+    if sales is None:
+        sales = load_item_sales_data()
+
     if sales.empty:
         return pd.DataFrame(columns=["period", "item_name", "estimated_count"])
 
     if "item_name" in sales.columns:
+        df = sales.copy()
+        df["period"] = pd.to_datetime(df["period"])
+        df["item_name"] = df["item_name"].astype(str).str.strip().str.title()
+        if "estimated_count" in df.columns:
+            metric_col = "estimated_count"
+        else:
+            metric_col = "count"
+        df[metric_col] = pd.to_numeric(df[metric_col], errors="coerce").fillna(0.0)
         result = (
-            sales.groupby(["period", "item_name"])["count"]
+            df.groupby(["period", "item_name"])[metric_col]
             .sum()
             .rename("estimated_count")
             .reset_index()
@@ -135,7 +151,7 @@ def estimate_ingredient_usage(
     Combine estimated item counts with recipe multipliers to produce ingredient demand.
     """
     if item_mix is None or item_mix.empty:
-        item_mix = estimate_item_mix(load_sales_data())
+        item_mix = estimate_item_mix(load_item_sales_data())
     if recipe_book is None:
         recipe_book = load_recipe_book(melt=True)
 
@@ -203,6 +219,7 @@ def compute_days_on_hand(
         merged["monthly_inflow"] / merged["average_daily_usage"],
         np.nan,
     )
+    merged["ingredient"] = merged["ingredient"].str.replace("_", " ").str.title()
     return merged[["ingredient", "average_daily_usage", "days_on_hand_estimate"]]
 
 
@@ -290,11 +307,14 @@ def build_inventory_insights(
 
 def build_alert_table(insights: Iterable[InventoryInsight]) -> pd.DataFrame:
     """Convert InventoryInsight objects into a DataFrame for display/export."""
+    def _format_name(name: str) -> str:
+        return name.replace("_", " ").title() if isinstance(name, str) else name
+
     rows = []
     for insight in insights:
         rows.append(
             {
-                "ingredient": insight.ingredient,
+                "ingredient": _format_name(insight.ingredient),
                 "avg_daily_usage": insight.average_daily_usage,
                 "days_on_hand": insight.days_on_hand,
                 "projected_depletion_date": insight.projected_depletion_date,

@@ -57,6 +57,7 @@ The app automatically discovers the datasets inside `MSYData/`. Use the sidebar 
 - **Recipe Reference**: Ingredient usage per menu item (`MSY Data - Ingredient.csv`) is normalized and combined with sales to estimate ingredient consumption.
 - **Shipments**: Recurring delivery schedules (`MSY Data - Shipment.csv`) help approximate inflow vs. usage to compute days-on-hand heuristics.
 - **Extensibility**: If your data cleaning teammate produces more granular sales exports (e.g., item-level POS data), drop them into `MSYData/` and update the loader to ingest the new schema. Feature functions will automatically prefer explicit `item_name` columns when present.
+- **Cleaned Exports**: The latest cleaned CSV outputs live under `dataanalysis/cleaned/`. The loaders automatically prioritize these files for category totals, menu-item revenue, recipes, and shipments.
 
 ## Example Insights
 - **Stock-at-risk list**: Ingredients sorted by projected depletion date plus suggested reorder quantity (based on forecasted demand).
