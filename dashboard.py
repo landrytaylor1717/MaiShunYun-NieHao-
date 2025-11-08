@@ -147,6 +147,8 @@ APPETIZER_KEYWORDS = [
     "rangoon",
     "tempura",
     "wing",
+    "nugget",
+    "tender",
 ]
 
 DESCRIPTOR_SET = {name.lower() for name in DESCRIPTOR_NAMES}
@@ -376,7 +378,12 @@ def render_drink_chart(
         )
 
     data["item_name"] = data["item_name"].astype(str).str.title()
-    y_field = alt.Y("item_name:N", sort="-x", title="Drink")
+    y_field = alt.Y(
+        "item_name:N",
+        sort="-x",
+        title="Drink",
+        axis=alt.Axis(labelLimit=0, labelOverlap=False),
+    )
 
     chart = (
         alt.Chart(data)
@@ -424,7 +431,12 @@ def render_appetizer_chart(
         .mark_bar()
         .encode(
             x="amount:Q",
-            y=alt.Y("item_name:N", sort="-x", title="Appetizer"),
+            y=alt.Y(
+                "item_name:N",
+                sort="-x",
+                title="Appetizer",
+                axis=alt.Axis(labelLimit=0, labelOverlap=False),
+            ),
             color=alt.Color("item_name:N", legend=None),
             tooltip=["item_name:N", "count:Q", "amount:Q"],
         )
@@ -447,13 +459,9 @@ def render_ingredient_chart(
         return
 
     usage = usage[
-        ~usage["ingredient"].str.contains(r"\b(ramen|egg)\b", case=False, na=False)
-        & ~usage["ingredient"].str.contains(r"\(count\)", case=False, na=False)
+        ~usage["ingredient"].str.contains("ramen", case=False, na=False)
+        & ~usage["ingredient"].str.contains("egg", case=False, na=False)
     ]
-    if usage.empty:
-        st.info("Ingredient usage metrics will appear once data is available.")
-        return
-
     usage = usage.assign(
         ingredient=lambda df: df["ingredient"].str.replace("_", " ").str.title()
     )

@@ -199,9 +199,7 @@ def _load_cleaned_item_sales() -> pd.DataFrame:
         return pd.DataFrame(columns=["period", "item_name", "count", "amount"])
 
     sales = pd.concat(frames, ignore_index=True)
-    sales = sales.sort_values(
-        ["period", "count"], key=lambda col: col.fillna(pd.Timestamp.min)
-    )
+    sales = sales.sort_values(["period", "item_name"])
     return sales.reset_index(drop=True)
 
 
