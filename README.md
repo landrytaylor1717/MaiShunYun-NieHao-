@@ -50,6 +50,13 @@ pip install -r requirements.txt
 streamlit run dashboard.py
 ```
 
+### 4. (Optional) AI Chatbot Backend
+The Gemini-powered assistant now runs through a lightweight FastAPI service. In a second terminal:
+```bash
+uvicorn backend.main:app --reload
+```
+The Streamlit UI will call `http://localhost:8000/chat` by default. Adjust the `CHAT_BACKEND_URL` environment variable if you deploy the backend elsewhere.
+
 The app automatically discovers the datasets inside `MSYData/`. Use the sidebar filters and chat assistant to explore insights.
 
 ## Data Integration Notes

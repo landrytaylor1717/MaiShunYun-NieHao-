@@ -7,19 +7,11 @@ and generate higher-level insights used by the Streamlit UI.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
-import numpy as np
 import pandas as pd
 
-from data_loader import (
-    load_item_sales_data,
-    load_recipe_book,
-    load_sales_data,
-    load_shipments,
-)
-from forecast import ForecastResult, holt_winters_forecast, moving_average_forecast
+from data_loader import load_item_sales_data, load_recipe_book, load_sales_data
 
 # Heuristic mapping from menu categories to the recipe book item names.
 CATEGORY_TO_ITEMS: Dict[str, Tuple[str, ...]] = {
@@ -51,16 +43,6 @@ CATEGORY_TO_ITEMS: Dict[str, Tuple[str, ...]] = {
         "Chicken Cutlet",
     ),
 }
-
-
-@dataclass
-class InventoryInsight:
-    ingredient: str
-    average_daily_usage: float
-    projected_depletion_date: Optional[pd.Timestamp]
-    days_on_hand: Optional[float]
-    recommended_reorder_qty: Optional[float]
-    forecast: ForecastResult
 
 
 def summarise_sales(sales: Optional[pd.DataFrame] = None) -> pd.DataFrame:
@@ -176,151 +158,4 @@ def estimate_ingredient_usage(
         .reset_index()
     )
     return usage
-
-
-def compute_days_on_hand(
-    usage: pd.DataFrame,
-    shipments: Optional[pd.DataFrame] = None,
-    lookback_periods: int = 2,
-) -> pd.DataFrame:
-    """
-    Estimate days-on-hand by comparing recent usage to shipment quantities.
-    """
-    if usage.empty:
-        return pd.DataFrame(
-            columns=["ingredient", "average_daily_usage", "days_on_hand_estimate"]
-        )
-    if shipments is None:
-        shipments = load_shipments()
-
-    usage["period"] = pd.to_datetime(usage["period"])
-    recent = (
-        usage.sort_values("period")
-        .groupby("ingredient")
-        .tail(lookback_periods)
-        .groupby("ingredient")["estimated_usage"]
-        .mean()
-        .rename("avg_period_usage")
-        .reset_index()
-    )
-
-    # Assume monthly reporting periods; convert to daily usage.
-    recent["average_daily_usage"] = recent["avg_period_usage"] / 30.0
-
-    inventory = shipments.copy()
-    inventory["ingredient"] = inventory["ingredient"].str.lower()
-    inventory["monthly_inflow"] = inventory["quantity_per_shipment"] * inventory[
-        "shipments"
-    ]
-    merged = recent.merge(inventory[["ingredient", "monthly_inflow"]], how="left")
-    merged["monthly_inflow"] = merged["monthly_inflow"].fillna(0)
-    merged["days_on_hand_estimate"] = np.where(
-        merged["average_daily_usage"] > 0,
-        merged["monthly_inflow"] / merged["average_daily_usage"],
-        np.nan,
-    )
-    merged["ingredient"] = merged["ingredient"].str.replace("_", " ").str.title()
-    return merged[["ingredient", "average_daily_usage", "days_on_hand_estimate"]]
-
-
-def build_inventory_insights(
-    usage: pd.DataFrame,
-    current_stock: Optional[pd.DataFrame] = None,
-    horizon: int = 14,
-) -> Iterable[InventoryInsight]:
-    """
-    Construct ingredient reorder insights using forecasts and stock figures.
-
-    Parameters
-    ----------
-    usage
-        DataFrame produced by `estimate_ingredient_usage`.
-    current_stock
-        Optional DataFrame with columns `ingredient` and `on_hand`.
-        When omitted, shipment-based inflow is used as a loose proxy.
-    horizon
-        Forecast horizon in days.
-    """
-    if usage.empty:
-        return []
-
-    usage = usage.copy()
-    usage["period"] = pd.to_datetime(usage["period"])
-    usage = usage.sort_values("period")
-
-    inventory_lookup = None
-    if current_stock is not None and not current_stock.empty:
-        inventory_lookup = (
-            current_stock.assign(ingredient=lambda df: df["ingredient"].str.lower())
-            .set_index("ingredient")["on_hand"]
-        )
-
-    insights: list[InventoryInsight] = []
-    grouped = usage.groupby("ingredient", sort=False)
-    for ingredient, group in grouped:
-        series = (
-            group.set_index("period")["estimated_usage"]
-            .sort_index()
-            .astype(float)
-        )
-        series = series.asfreq("MS", method="ffill").fillna(method="bfill")
-        forecast = (
-            holt_winters_forecast(series, horizon)
-            if len(series) >= 4
-            else moving_average_forecast(series, horizon)
-        )
-
-        current_qty = (
-            inventory_lookup.get(ingredient)
-            if inventory_lookup is not None and ingredient in inventory_lookup
-            else np.nan
-        )
-        daily_usage = series.tail(1).iloc[0] / 30.0 if len(series) else np.nan
-        depletion = (
-            forecast.point_forecast.cumsum() / 30.0
-            if isinstance(forecast.point_forecast.index, pd.DatetimeIndex)
-            else forecast.point_forecast.cumsum()
-        )
-
-        reorder_date = None
-        recommended_qty = None
-        days_on_hand = None
-
-        if not np.isnan(current_qty) and daily_usage > 0:
-            days_on_hand = current_qty / daily_usage
-            cumulative = forecast.point_forecast.cumsum()
-            threshold = cumulative[cumulative >= current_qty]
-            reorder_date = threshold.index[0] if not threshold.empty else None
-            recommended_qty = daily_usage * horizon
-
-        insight = InventoryInsight(
-            ingredient=ingredient,
-            average_daily_usage=daily_usage,
-            projected_depletion_date=reorder_date,
-            days_on_hand=days_on_hand,
-            recommended_reorder_qty=recommended_qty,
-            forecast=forecast,
-        )
-        insights.append(insight)
-    return insights
-
-
-def build_alert_table(insights: Iterable[InventoryInsight]) -> pd.DataFrame:
-    """Convert InventoryInsight objects into a DataFrame for display/export."""
-    def _format_name(name: str) -> str:
-        return name.replace("_", " ").title() if isinstance(name, str) else name
-
-    rows = []
-    for insight in insights:
-        rows.append(
-            {
-                "ingredient": _format_name(insight.ingredient),
-                "avg_daily_usage": insight.average_daily_usage,
-                "days_on_hand": insight.days_on_hand,
-                "projected_depletion_date": insight.projected_depletion_date,
-                "recommended_reorder_qty": insight.recommended_reorder_qty,
-                "model": insight.forecast.model_name,
-            }
-        )
-    return pd.DataFrame(rows)
 
